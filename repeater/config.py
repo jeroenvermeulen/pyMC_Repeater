@@ -81,6 +81,13 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     if "identity_key" not in config["mesh"]:
         config["mesh"]["identity_key"] = _load_or_create_identity_key()
 
+    # Auto-generate client identity key if client is enabled and key not provided
+    if config.get("client", {}).get("enabled", False):
+        if "client" not in config:
+            config["client"] = {}
+        if "identity_key" not in config["client"]:
+            config["client"]["identity_key"] = _load_or_create_identity_key(name="client")
+
     if os.getenv("PYMC_REPEATER_LOG_LEVEL"):
         if "logging" not in config:
             config["logging"] = {}
@@ -153,7 +160,7 @@ def update_global_flood_policy(allow: bool, config_path: Optional[str] = None) -
         return False
 
 
-def _load_or_create_identity_key(path: Optional[str] = None) -> bytes:
+def _load_or_create_identity_key(path: Optional[str] = None, name: str = "identity") -> bytes:
 
     if path is None:
         # Follow XDG spec
@@ -162,7 +169,7 @@ def _load_or_create_identity_key(path: Optional[str] = None) -> bytes:
             config_dir = Path(xdg_config_home) / "pymc_repeater"
         else:
             config_dir = Path.home() / ".config" / "pymc_repeater"
-        key_path = config_dir / "identity.key"
+        key_path = config_dir / f"{name}.key"
     else:
         key_path = Path(path)
 

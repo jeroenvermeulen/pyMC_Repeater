@@ -954,3 +954,107 @@ class APIEndpoints:
         except Exception as e:
             logger.error(f"Error pinging neighbor: {e}")
             return self._error(e)
+
+    # ------------------------------------------------------------------
+    # Client identity endpoints
+    # ------------------------------------------------------------------
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    @cherrypy.tools.json_in()
+    def send_message(self):
+        """POST /api/send_message
+
+        Send a text message from the client identity to a recipient node.
+
+        Request body (JSON):
+            recipient_pubkey (str): Recipient's Ed25519 public key as hex.
+            message         (str): Text to send.
+            message_type    (str): ``"direct"`` (default, with ACK) or ``"flood"``.
+
+        Returns:
+            JSON with ``success``, ``message``, ``recipient``,
+            ``message_type``, and ``crc`` fields.
+        """
+        self._set_cors_headers()
+        try:
+            self._require_post()
+
+            if not self.daemon_instance:
+                return self._error("Daemon not available")
+
+            if not self.daemon_instance.client_identity:
+                return self._error(
+                    "Client identity not initialised – enable 'client' in config and restart"
+                )
+
+            data = cherrypy.request.json or {}
+            recipient = data.get("recipient_pubkey", "").strip()
+            message = data.get("message", "").strip()
+            message_type = data.get("message_type", "direct")
+
+            if not recipient:
+                return self._error("Missing 'recipient_pubkey'")
+            if not message:
+                return self._error("Missing 'message'")
+            if message_type not in ("direct", "flood"):
+                return self._error("'message_type' must be 'direct' or 'flood'")
+
+            if self.event_loop is None:
+                return self._error("Event loop not available")
+
+            import asyncio
+            future = asyncio.run_coroutine_threadsafe(
+                self.daemon_instance.send_message(recipient, message, message_type),
+                self.event_loop,
+            )
+            result = future.result(timeout=15)
+
+            if result.get("success"):
+                return self._success(result)
+            return self._error(result.get("error", "Failed to send message"))
+
+        except cherrypy.HTTPError:
+            raise
+        except Exception as e:
+            logger.error(f"Error sending message: {e}", exc_info=True)
+            return self._error(e)
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    def send_client_advert(self):
+        """POST /api/send_client_advert
+
+        Broadcast a flood advertisement for the client identity (chat node).
+        """
+        self._set_cors_headers()
+        try:
+            self._require_post()
+
+            if not self.daemon_instance:
+                return self._error("Daemon not available")
+
+            if not self.daemon_instance.client_identity:
+                return self._error(
+                    "Client identity not initialised – enable 'client' in config and restart"
+                )
+
+            if self.event_loop is None:
+                return self._error("Event loop not available")
+
+            import asyncio
+            future = asyncio.run_coroutine_threadsafe(
+                self.daemon_instance.send_client_advert(),
+                self.event_loop,
+            )
+            result = future.result(timeout=10)
+
+            if result:
+                return self._success("Client advert sent successfully")
+            return self._error("Failed to send client advert")
+
+        except cherrypy.HTTPError:
+            raise
+        except Exception as e:
+            logger.error(f"Error sending client advert: {e}", exc_info=True)
+            return self._error(e)

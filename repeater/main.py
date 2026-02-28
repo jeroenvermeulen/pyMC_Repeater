@@ -22,6 +22,7 @@ class RepeaterDaemon:
         self.repeater_handler = None
         self.local_hash = None
         self.local_identity = None
+        self.client_identity = None
         self.http_server = None
         self.trace_helper = None
         self.advert_helper = None
@@ -101,6 +102,23 @@ class RepeaterDaemon:
 
 
             self.dispatcher._is_own_packet = lambda pkt: False
+
+            # Initialise optional client identity
+            client_config = self.config.get("client", {})
+            if client_config.get("enabled", False):
+                client_key = client_config.get("identity_key")
+                if client_key:
+                    self.client_identity = LocalIdentity(seed=client_key)
+                    client_name = client_config.get("node_name", "PyMC-Client")
+                    logger.info(
+                        f"Client identity '{client_name}' initialised: "
+                        f"{self.client_identity.get_address_bytes().hex()}"
+                    )
+                else:
+                    logger.warning("Client enabled but no identity_key found – skipping client init")
+
+            # Defer client advert – dispatcher not yet running here; sent after run_forever starts
+            # (send_client_advert is exposed for on-demand use via the API too)
 
             self.repeater_handler = RepeaterHandler(
                 self.config, self.dispatcher, self.local_hash, send_advert_func=self.send_advert
@@ -218,6 +236,105 @@ class RepeaterDaemon:
             logger.error(f"Failed to send advert: {e}", exc_info=True)
             return False
 
+    async def send_client_advert(self) -> bool:
+        """Send a flood advertisement for the client identity (chat node type)."""
+
+        if not self.dispatcher or not self.client_identity:
+            logger.error("Cannot send client advert: dispatcher or client identity not initialised")
+            return False
+
+        try:
+            from pymc_core.protocol import PacketBuilder
+            from pymc_core.protocol.constants import ADVERT_FLAG_HAS_NAME, ADVERT_FLAG_IS_CHAT_NODE
+
+            client_config = self.config.get("client", {})
+            node_name = client_config.get("node_name", "PyMC-Client")
+
+            flags = ADVERT_FLAG_IS_CHAT_NODE | ADVERT_FLAG_HAS_NAME
+
+            packet = PacketBuilder.create_advert(
+                local_identity=self.client_identity,
+                name=node_name,
+                lat=0.0,
+                lon=0.0,
+                flags=flags,
+                route_type="flood",
+            )
+
+            await self.dispatcher.send_packet(packet, wait_for_ack=False)
+            logger.info(f"Sent client flood advert '{node_name}'")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to send client advert: {e}", exc_info=True)
+            return False
+
+    async def send_message(
+        self,
+        recipient_pubkey_hex: str,
+        message: str,
+        message_type: str = "direct",
+    ) -> dict:
+        """Send a text message from the client identity to a recipient.
+
+        Args:
+            recipient_pubkey_hex: Recipient's Ed25519 public key as a hex string.
+            message: Text content to send.
+            message_type: Routing type – ``"direct"`` (with ACK) or ``"flood"``.
+
+        Returns:
+            Dictionary with ``success``, ``message``, ``recipient``,
+            ``message_type``, and ``crc`` keys.
+        """
+
+        if not self.client_identity:
+            return {"success": False, "error": "Client identity not initialised or client not enabled"}
+        if not self.dispatcher:
+            return {"success": False, "error": "Dispatcher not initialised"}
+
+        try:
+            from pymc_core.protocol import PacketBuilder
+
+            class _Contact:
+                """Minimal contact object required by PacketBuilder."""
+                def __init__(self, public_key: str):
+                    self.public_key = public_key  # hex string
+                    self.out_path: list = []
+
+            contact = _Contact(recipient_pubkey_hex)
+
+            pkt, ack_crc = PacketBuilder.create_text_message(
+                contact=contact,
+                local_identity=self.client_identity,
+                message=message,
+                attempt=1,
+                message_type=message_type,
+            )
+
+            wait_ack = message_type == "direct"
+            success = await self.dispatcher.send_packet(
+                pkt,
+                wait_for_ack=wait_ack,
+                expected_crc=ack_crc if wait_ack else None,
+            )
+
+            logger.info(
+                f"Message {'sent' if success else 'failed'} to {recipient_pubkey_hex[:16]}… "
+                f"(type={message_type}, crc={ack_crc:08X})"
+            )
+
+            return {
+                "success": success,
+                "message": message,
+                "recipient": recipient_pubkey_hex,
+                "message_type": message_type,
+                "crc": f"{ack_crc:08X}",
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to send message: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
+
     async def run(self):
 
         logger.info("Repeater daemon started")
@@ -259,6 +376,10 @@ class RepeaterDaemon:
             self.http_server.start()
         except Exception as e:
             logger.error(f"Failed to start HTTP server: {e}")
+
+        # Send client startup advert if client identity is configured
+        if self.client_identity:
+            await self.send_client_advert()
 
         # Run dispatcher (handles RX/TX via pymc_core)
         try:
