@@ -311,6 +311,52 @@ class RepeaterDaemon:
             except Exception as e:
                 logger.error(f"Failed to load room server identity '{name}': {e}")
         
+        # Load client identities
+        clients = identities_config.get("clients") or []
+        for client_config in clients:
+            try:
+                name = client_config.get("name")
+                identity_key = client_config.get("identity_key")
+
+                if not name or not identity_key:
+                    logger.warning("Skipping client config: missing name or identity_key")
+                    continue
+
+                # Convert identity_key to bytes if it's a hex string
+                if isinstance(identity_key, bytes):
+                    identity_key_bytes = identity_key
+                elif isinstance(identity_key, str):
+                    try:
+                        identity_key_bytes = bytes.fromhex(identity_key)
+                        if len(identity_key_bytes) != 32:
+                            logger.error(f"Identity key for client '{name}' is invalid length: {len(identity_key_bytes)} bytes (expected 32)")
+                            continue
+                    except ValueError as e:
+                        logger.error(f"Identity key for client '{name}' is not valid hex: {e}")
+                        continue
+                else:
+                    logger.error(f"Identity key for client '{name}' has unknown type: {type(identity_key)}")
+                    continue
+
+                client_identity = LocalIdentity(seed=identity_key_bytes)
+
+                success = self._register_identity_everywhere(
+                    name=name,
+                    identity=client_identity,
+                    config=client_config,
+                    identity_type="client"
+                )
+
+                if success:
+                    client_hash = client_identity.get_public_key()[0]
+                    logger.info(
+                        f"Loaded client '{name}': hash=0x{client_hash:02x}, "
+                        f"address={client_identity.get_address_bytes().hex()}"
+                    )
+
+            except Exception as e:
+                logger.error(f"Failed to load client identity '{name}': {e}")
+
         # Summary logging
         total_identities = len(self.identity_manager.list_identities())
         logger.info(f"Identity manager loaded {total_identities} total identities")
@@ -457,6 +503,70 @@ class RepeaterDaemon:
         except Exception as e:
             logger.error(f"Failed to send advert: {e}", exc_info=True)
             return False
+
+    async def send_channel_message(
+        self,
+        client_name: str,
+        channel: str,
+        message: str,
+    ) -> dict:
+        """Send a text message to a public group/channel from a named client identity."""
+        if not self.dispatcher:
+            return {"success": False, "error": "Dispatcher not initialised"}
+        if not self.identity_manager:
+            return {"success": False, "error": "Identity manager not initialised"}
+
+        # Look up the client identity by name
+        identity_info = self.identity_manager.get_identity_by_name(client_name)
+        if not identity_info:
+            return {"success": False, "error": f"Client identity '{client_name}' not found"}
+
+        client_identity, _config, id_type = identity_info
+        if id_type != "client":
+            return {"success": False, "error": f"Identity '{client_name}' is not a client (type={id_type})"}
+
+        try:
+            from pymc_core.protocol import PacketBuilder
+            from pymc_core.protocol.transport_keys import get_auto_key_for
+
+            # Derive transport key from channel name
+            transport_key = get_auto_key_for(channel)
+
+            # Try the available method for creating channel/group messages
+            if hasattr(PacketBuilder, 'create_channel_message'):
+                pkt = PacketBuilder.create_channel_message(
+                    local_identity=client_identity,
+                    channel_key=transport_key,
+                    message=message,
+                )
+            elif hasattr(PacketBuilder, 'create_group_text'):
+                pkt = PacketBuilder.create_group_text(
+                    local_identity=client_identity,
+                    channel_key=transport_key,
+                    message=message,
+                )
+            else:
+                return {"success": False, "error": "PacketBuilder does not have a channel/group message method"}
+
+            await self.dispatcher.send_packet(pkt, wait_for_ack=False)
+
+            sender_pubkey = client_identity.get_public_key().hex()
+            logger.info(
+                f"Channel message sent to '{channel}' from client '{client_name}' "
+                f"(sender={sender_pubkey[:16]}...)"
+            )
+
+            return {
+                "success": True,
+                "channel": channel,
+                "message": message,
+                "sender": sender_pubkey,
+                "client_name": client_name,
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to send channel message: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
 
     async def run(self):
 

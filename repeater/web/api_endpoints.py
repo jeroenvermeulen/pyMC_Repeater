@@ -86,10 +86,13 @@ logger = logging.getLogger("HTTPServer")
 # Identity Management
 # GET    /api/identities - List all identities
 # GET    /api/identity?name=<name> - Get specific identity
-# POST   /api/create_identity {"name": "...", "identity_key": "...", "type": "room_server", "settings": {...}} - Create identity
+# POST   /api/create_identity {"name": "...", "identity_key": "...", "type": "room_server|client", "settings": {...}} - Create identity
 # PUT    /api/update_identity {"name": "...", "new_name": "...", "identity_key": "...", "settings": {...}} - Update identity
 # DELETE /api/delete_identity?name=<name> - Delete identity
 # POST   /api/send_room_server_advert {"name": "...", "node_name": "...", "latitude": 0.0, "longitude": 0.0} - Send room server advert
+
+# Client Identity
+# POST   /api/client_post_group_message {"client_name": "...", "channel": "Public", "message": "..."} - Post message to group channel
 
 # ACL (Access Control List)
 # GET    /api/acl_info - Get ACL configuration and stats for all identities
@@ -1822,7 +1825,8 @@ class APIEndpoints:
             # Get configured identities from config
             identities_config = self.config.get("identities", {})
             room_servers = identities_config.get("room_servers") or []
-            
+            clients = identities_config.get("clients") or []
+
             # Enhance with config data
             configured = []
             for room_config in room_servers:
@@ -1846,7 +1850,28 @@ class APIEndpoints:
                     "address": matching["address"] if matching else None,
                     "registered": matching is not None
                 })
-            
+
+            for client_config in clients:
+                name = client_config.get("name")
+                identity_key = client_config.get("identity_key", "")
+                settings = client_config.get("settings", {})
+
+                matching = next(
+                    (r for r in registered_identities if r["name"] == f"client:{name}"),
+                    None
+                )
+
+                configured.append({
+                    "name": name,
+                    "type": "client",
+                    "identity_key": identity_key[:16] + "..." if len(identity_key) > 16 else identity_key,
+                    "identity_key_length": len(identity_key),
+                    "settings": settings,
+                    "hash": matching["hash"] if matching else None,
+                    "address": matching["address"] if matching else None,
+                    "registered": matching is not None
+                })
+
             return self._success({
                 "registered": registered_identities,
                 "configured": configured,
@@ -1876,13 +1901,19 @@ class APIEndpoints:
             
             identities_config = self.config.get("identities", {})
             room_servers = identities_config.get("room_servers") or []
-            
-            # Find the identity in config
+            clients = identities_config.get("clients") or []
+
+            # Find the identity in config (check all types)
             identity_config = next(
                 (r for r in room_servers if r.get("name") == name),
                 None
             )
-            
+            if not identity_config:
+                identity_config = next(
+                    (c for c in clients if c.get("name") == name),
+                    None
+                )
+
             if not identity_config:
                 return self._error(f"Identity '{name}' not found")
             
@@ -1915,7 +1946,7 @@ class APIEndpoints:
         """
         POST /api/create_identity - Create a new identity
         
-        Body: {
+        Body (room_server): {
             "name": "MyRoomServer",
             "identity_key": "hex_key_string",  # Optional - will be auto-generated if not provided
             "type": "room_server",
@@ -1926,6 +1957,15 @@ class APIEndpoints:
                 "disable_fwd": true,
                 "admin_password": "secret123",  # Optional - admin access password
                 "guest_password": "guest456"    # Optional - guest/read-only access password
+            }
+        }
+
+        Body (client): {
+            "name": "MyClient",
+            "identity_key": "hex_key_string",  # Optional - will be auto-generated if not provided
+            "type": "client",
+            "settings": {
+                "node_name": "My Client Node"  # Optional display name
             }
         }
         """
@@ -1947,11 +1987,12 @@ class APIEndpoints:
             if not name:
                 return self._error("Missing required field: name")
             
-            # Validate passwords are different if both provided
-            admin_pw = settings.get("admin_password")
-            guest_pw = settings.get("guest_password")
-            if admin_pw and guest_pw and admin_pw == guest_pw:
-                return self._error("admin_password and guest_password must be different")
+            # Validate passwords are different if both provided (only relevant for room_server)
+            if identity_type == "room_server":
+                admin_pw = settings.get("admin_password")
+                guest_pw = settings.get("guest_password")
+                if admin_pw and guest_pw and admin_pw == guest_pw:
+                    return self._error("admin_password and guest_password must be different")
             
             # Auto-generate identity key if not provided
             key_was_generated = False
@@ -1967,15 +2008,18 @@ class APIEndpoints:
                     return self._error(f"Failed to auto-generate identity key: {gen_error}")
             
             # Validate identity type
-            if identity_type not in ["room_server"]:
-                return self._error(f"Invalid identity type: {identity_type}. Only 'room_server' is supported.")
-            
-            # Check if identity already exists
+            if identity_type not in ["room_server", "client"]:
+                return self._error(f"Invalid identity type: {identity_type}. Supported types: 'room_server', 'client'.")
+
+            # Check if identity already exists (across all identity types)
             identities_config = self.config.get("identities", {})
             room_servers = identities_config.get("room_servers") or []
-            
+            clients = identities_config.get("clients") or []
+
             if any(r.get("name") == name for r in room_servers):
-                return self._error(f"Identity with name '{name}' already exists")
+                return self._error(f"Identity with name '{name}' already exists (room_server)")
+            if any(c.get("name") == name for c in clients):
+                return self._error(f"Identity with name '{name}' already exists (client)")
             
             # Create new identity config
             new_identity = {
@@ -1985,12 +2029,16 @@ class APIEndpoints:
                 "settings": settings
             }
             
-            # Add to config
-            room_servers.append(new_identity)
-            
+            # Add to config based on type
             if "identities" not in self.config:
                 self.config["identities"] = {}
-            self.config["identities"]["room_servers"] = room_servers
+
+            if identity_type == "room_server":
+                room_servers.append(new_identity)
+                self.config["identities"]["room_servers"] = room_servers
+            elif identity_type == "client":
+                clients.append(new_identity)
+                self.config["identities"]["clients"] = clients
             
             # Save to file
             self.config_manager.save_to_file()
@@ -2016,13 +2064,13 @@ class APIEndpoints:
                         logger.error(f"Unknown identity_key type: {type(identity_key)}")
                         identity_key_bytes = bytes(identity_key)
                     
-                    room_identity = LocalIdentity(seed=identity_key_bytes)
-                    
+                    new_identity_obj = LocalIdentity(seed=identity_key_bytes)
+
                     # Use the consolidated registration method
                     if hasattr(self.daemon_instance, '_register_identity_everywhere'):
                         registration_success = self.daemon_instance._register_identity_everywhere(
                             name=name,
-                            identity=room_identity,
+                            identity=new_identity_obj,
                             config=new_identity,
                             identity_type=identity_type
                         )
@@ -2089,23 +2137,35 @@ class APIEndpoints:
             
             identities_config = self.config.get("identities", {})
             room_servers = identities_config.get("room_servers") or []
-            
-            # Find the identity
+            clients = identities_config.get("clients") or []
+
+            # Find the identity (check all types)
+            identity_list = None
             identity_index = next(
                 (i for i, r in enumerate(room_servers) if r.get("name") == name),
                 None
             )
-            
-            if identity_index is None:
+            if identity_index is not None:
+                identity_list = room_servers
+            else:
+                identity_index = next(
+                    (i for i, c in enumerate(clients) if c.get("name") == name),
+                    None
+                )
+                if identity_index is not None:
+                    identity_list = clients
+
+            if identity_index is None or identity_list is None:
                 return self._error(f"Identity '{name}' not found")
-            
+
             # Update fields
-            identity = room_servers[identity_index]
-            
+            identity = identity_list[identity_index]
+
             if "new_name" in data:
                 new_name = data["new_name"]
-                # Check if new name conflicts
-                if any(r.get("name") == new_name for i, r in enumerate(room_servers) if i != identity_index):
+                # Check if new name conflicts (across all types)
+                all_names = [r.get("name") for r in room_servers + clients if r.get("name") != name]
+                if new_name in all_names:
                     return self._error(f"Identity with name '{new_name}' already exists")
                 identity["name"] = new_name
             
@@ -2226,16 +2286,25 @@ class APIEndpoints:
             
             identities_config = self.config.get("identities", {})
             room_servers = identities_config.get("room_servers") or []
-            
-            # Find and remove the identity
-            initial_count = len(room_servers)
+            clients = identities_config.get("clients") or []
+
+            # Find and remove the identity (check all types)
+            found = False
+            initial_rs = len(room_servers)
             room_servers = [r for r in room_servers if r.get("name") != name]
-            
-            if len(room_servers) == initial_count:
+            if len(room_servers) < initial_rs:
+                found = True
+                self.config["identities"]["room_servers"] = room_servers
+
+            if not found:
+                initial_cl = len(clients)
+                clients = [c for c in clients if c.get("name") != name]
+                if len(clients) < initial_cl:
+                    found = True
+                    self.config["identities"]["clients"] = clients
+
+            if not found:
                 return self._error(f"Identity '{name}' not found")
-            
-            # Update config
-            self.config["identities"]["room_servers"] = room_servers
             
             self.config_manager.save_to_file()
             
@@ -2397,6 +2466,64 @@ class APIEndpoints:
         except Exception as e:
             logger.error(f"Failed to send room server advert: {e}", exc_info=True)
             return False
+
+    # ========== Client Identity Endpoints ==========
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    @cherrypy.tools.json_in()
+    def client_post_group_message(self):
+        """
+        POST /api/client_post_group_message - Send a message to a public group channel
+
+        Body: {
+            "client_name": "MyClient",      # Name of the registered client identity
+            "channel": "Public",            # Channel / group name
+            "message": "Hello world"        # Text to broadcast
+        }
+        """
+        self._set_cors_headers()
+
+        if cherrypy.request.method == "OPTIONS":
+            return ""
+
+        try:
+            self._require_post()
+
+            if not self.daemon_instance:
+                return self._error("Daemon not available")
+
+            data = cherrypy.request.json or {}
+            client_name = data.get("client_name", "").strip()
+            channel = data.get("channel", "").strip()
+            message = data.get("message", "").strip()
+
+            if not client_name:
+                return self._error("Missing 'client_name'")
+            if not channel:
+                return self._error("Missing 'channel'")
+            if not message:
+                return self._error("Missing 'message'")
+
+            if self.event_loop is None:
+                return self._error("Event loop not available")
+
+            import asyncio
+            future = asyncio.run_coroutine_threadsafe(
+                self.daemon_instance.send_channel_message(client_name, channel, message),
+                self.event_loop,
+            )
+            result = future.result(timeout=15)
+
+            if result.get("success"):
+                return self._success(result)
+            return self._error(result.get("error", "Failed to send channel message"))
+
+        except cherrypy.HTTPError:
+            raise
+        except Exception as e:
+            logger.error(f"Error sending channel message: {e}", exc_info=True)
+            return self._error(e)
 
     # ========== ACL (Access Control List) Endpoints ==========
     
