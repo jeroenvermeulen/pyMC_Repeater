@@ -56,6 +56,8 @@ tags:
     description: Access Control Lists
   - name: Room Server
     description: Room server messaging
+  - name: Client
+    description: Client identity messaging
 
 paths:
   # ============================================================================
@@ -1321,10 +1323,11 @@ paths:
                   example: "abc123def456..."
                 type:
                   type: string
-                  enum: [repeater, room_server]
+                  enum: [repeater, room_server, client]
                   description: |
                     - repeater: Repeater identity (only one allowed)
                     - room_server: Room server for group chat
+                    - client: Client identity for sending messages
                   example: room_server
                 settings:
                   type: object
@@ -1361,6 +1364,10 @@ paths:
                   name: "My Repeater"
                   type: repeater
                   identity_key: "abc123def456..."
+              client:
+                value:
+                  name: "My Client"
+                  type: client
       responses:
         '200':
           description: Identity created
@@ -1549,6 +1556,85 @@ paths:
                 $ref: '#/components/schemas/SuccessResponse'
 
   # ============================================================================
+  # Client Identity
+  # ============================================================================
+  /client_post_group_message:
+    post:
+      tags: [Client]
+      summary: Post message to group channel
+      description: |
+        Send a text message to a public group/channel (e.g. "Public" or "#test")
+        from a registered client identity.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [client_name, channel, message]
+              properties:
+                client_name:
+                  type: string
+                  description: Name of the registered client identity
+                  example: "MyClient"
+                channel:
+                  type: string
+                  description: Channel / group name to post to
+                  example: "Public"
+                message:
+                  type: string
+                  description: Text message to broadcast
+                  example: "Hello world"
+            examples:
+              public_channel:
+                value:
+                  client_name: "MyClient"
+                  channel: "Public"
+                  message: "Hello from the API!"
+              named_channel:
+                value:
+                  client_name: "MyClient"
+                  channel: "#test"
+                  message: "Testing channel message"
+      responses:
+        '200':
+          description: Message sent successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      channel:
+                        type: string
+                      message:
+                        type: string
+                      sender:
+                        type: string
+                        description: Public key hex of the sending client
+                      client_name:
+                        type: string
+              examples:
+                success:
+                  value:
+                    success: true
+                    data:
+                      channel: "Public"
+                      message: "Hello from the API!"
+                      sender: "abc123def456..."
+                      client_name: "MyClient"
+        '400':
+          description: Invalid parameters or client not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ============================================================================
   # ACL (Access Control List)
   # ============================================================================
   /acl_info:
@@ -1587,7 +1673,7 @@ paths:
                               example: "repeater"
                             type:
                               type: string
-                              enum: [repeater, room_server]
+                              enum: [repeater, room_server, client]
                               example: "repeater"
                             hash:
                               type: string
@@ -2349,10 +2435,11 @@ components:
           example: "General Chat"
         type:
           type: string
-          enum: [repeater, room_server]
+          enum: [repeater, room_server, client]
           description: |
             - repeater: Repeater identity (only one allowed per system)
             - room_server: Room server for group chat
+            - client: Client identity for sending messages
           example: room_server
         hash:
           type: string
@@ -2430,7 +2517,7 @@ components:
           example: "rrrrr"
         identity_type:
           type: string
-          enum: [repeater, room_server]
+          enum: [repeater, room_server, client]
           description: Type of identity
           example: "room_server"
         identity_hash:
