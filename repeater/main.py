@@ -335,6 +335,77 @@ class RepeaterDaemon:
             logger.error(f"Failed to send message: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
 
+    async def send_channel_message(self, channel_name: str, message: str) -> dict:
+        """Send a text message to a channel (group) from the client identity.
+
+        The channel must already exist as a transport key in the database.
+        The message is encrypted with the channel's shared secret and broadcast
+        as a flood GRP_TXT packet — no ACK is expected.
+
+        Args:
+            channel_name: Name of the channel as stored in transport keys (e.g. ``#general``).
+            message: Text content to broadcast.
+
+        Returns:
+            Dictionary with ``success``, ``channel``, ``message``, and ``sender`` keys.
+        """
+        if not self.client_identity:
+            return {"success": False, "error": "Client identity not initialised or client not enabled"}
+        if not self.dispatcher:
+            return {"success": False, "error": "Dispatcher not initialised"}
+
+        try:
+            import base64
+            from pymc_core.protocol import PacketBuilder
+
+            # Retrieve the channel's transport key from storage
+            storage = self.repeater_handler.storage if self.repeater_handler else None
+            if not storage:
+                return {"success": False, "error": "Storage not available"}
+
+            transport_keys = storage.get_transport_keys()
+            channel_record = next(
+                (k for k in transport_keys if k["name"] == channel_name), None
+            )
+            if not channel_record:
+                return {
+                    "success": False,
+                    "error": f"Channel '{channel_name}' not found – create it first via /api/transport_keys",
+                }
+
+            # Convert base64-stored key to hex for PacketBuilder
+            key_bytes = base64.b64decode(channel_record["transport_key"])
+            channels_config = [{"name": channel_name, "secret": key_bytes.hex()}]
+
+            client_config = self.config.get("client", {})
+            sender_name = client_config.get("node_name", "PyMC-Client")
+
+            pkt = PacketBuilder.create_group_datagram(
+                group_name=channel_name,
+                local_identity=self.client_identity,
+                message=message,
+                sender_name=sender_name,
+                channels_config=channels_config,
+            )
+
+            success = await self.dispatcher.send_packet(pkt, wait_for_ack=False)
+
+            logger.info(
+                f"Channel message {'sent' if success else 'failed'} "
+                f"to '{channel_name}' as '{sender_name}'"
+            )
+
+            return {
+                "success": success,
+                "channel": channel_name,
+                "message": message,
+                "sender": sender_name,
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to send channel message: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
+
     async def run(self):
 
         logger.info("Repeater daemon started")

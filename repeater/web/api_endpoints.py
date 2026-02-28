@@ -1022,6 +1022,65 @@ class APIEndpoints:
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
+    @cherrypy.tools.json_in()
+    def send_channel_message(self):
+        """POST /api/send_channel_message
+
+        Send a text message to a channel from the client identity.
+
+        The channel must already exist as a transport key in the database
+        (create it via POST /api/transport_keys first).
+
+        Request body (JSON):
+            channel  (str): Channel name, e.g. ``"#general"``.
+            message  (str): Text to broadcast.
+
+        Returns:
+            JSON with ``success``, ``channel``, ``message``, and ``sender`` fields.
+        """
+        self._set_cors_headers()
+        try:
+            self._require_post()
+
+            if not self.daemon_instance:
+                return self._error("Daemon not available")
+
+            if not self.daemon_instance.client_identity:
+                return self._error(
+                    "Client identity not initialised – enable 'client' in config and restart"
+                )
+
+            data = cherrypy.request.json or {}
+            channel = data.get("channel", "").strip()
+            message = data.get("message", "").strip()
+
+            if not channel:
+                return self._error("Missing 'channel'")
+            if not message:
+                return self._error("Missing 'message'")
+
+            if self.event_loop is None:
+                return self._error("Event loop not available")
+
+            import asyncio
+            future = asyncio.run_coroutine_threadsafe(
+                self.daemon_instance.send_channel_message(channel, message),
+                self.event_loop,
+            )
+            result = future.result(timeout=15)
+
+            if result.get("success"):
+                return self._success(result)
+            return self._error(result.get("error", "Failed to send channel message"))
+
+        except cherrypy.HTTPError:
+            raise
+        except Exception as e:
+            logger.error(f"Error sending channel message: {e}", exc_info=True)
+            return self._error(e)
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
     def send_client_advert(self):
         """POST /api/send_client_advert
 
