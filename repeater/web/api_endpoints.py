@@ -2629,7 +2629,7 @@ class APIEndpoints:
                 feature1=0,
                 feature2=0,
                 flags=flags,
-                route_type="flood",
+                route_type="direct" if disable_fwd else "flood",
             )
 
             await self.daemon_instance.dispatcher.send_packet(packet, wait_for_ack=False)
