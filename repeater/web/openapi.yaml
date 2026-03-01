@@ -1634,6 +1634,48 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /send_client_advert:
+    post:
+      tags: [Client]
+      summary: Send client advertisement
+      description: Broadcast a client advertisement packet over the mesh network
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  description: Client identity name
+                  example: "MyClient"
+                latitude:
+                  type: number
+                  format: float
+                  description: GPS latitude
+                  example: 0.0
+                longitude:
+                  type: number
+                  format: float
+                  description: GPS longitude
+                  example: 0.0
+                disable_fwd:
+                  type: boolean
+                  description: Disable forwarding flag
+                  default: false
+      responses:
+        '200':
+          description: Advertisement sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
   # ============================================================================
   # ACL (Access Control List)
   # ============================================================================

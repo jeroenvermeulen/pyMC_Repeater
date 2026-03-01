@@ -93,6 +93,7 @@ logger = logging.getLogger("HTTPServer")
 
 # Client Identity
 # POST   /api/client_post_group_message {"client_name": "...", "channel": "Public", "message": "..."} - Post message to group channel
+# POST   /api/send_client_advert {"name": "...", "latitude": 0.0, "longitude": 0.0, "disable_fwd": false} - Send client advertisement
 
 # ACL (Access Control List)
 # GET    /api/acl_info - Get ACL configuration and stats for all identities
@@ -2524,6 +2525,125 @@ class APIEndpoints:
         except Exception as e:
             logger.error(f"Error sending channel message: {e}", exc_info=True)
             return self._error(e)
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    @cherrypy.tools.json_in()
+    def send_client_advert(self):
+        """
+        POST /api/send_client_advert - Send advert for a client identity
+
+        Body: {
+            "name": "MyClient",
+            "latitude": 0.0,
+            "longitude": 0.0,
+            "disable_fwd": false
+        }
+        """
+        self._set_cors_headers()
+
+        if cherrypy.request.method == "OPTIONS":
+            return ""
+
+        try:
+            self._require_post()
+
+            if not self.daemon_instance:
+                return self._error("Daemon not available")
+
+            data = cherrypy.request.json or {}
+            name = data.get("name")
+
+            if not name:
+                return self._error("Missing required field: name")
+
+            if not hasattr(self.daemon_instance, 'identity_manager'):
+                return self._error("Identity manager not available")
+
+            identity_manager = self.daemon_instance.identity_manager
+            identity_info = identity_manager.get_identity_by_name(name)
+
+            if not identity_info:
+                return self._error(f"Client '{name}' not found or not registered")
+
+            identity, config, identity_type = identity_info
+
+            if identity_type != "client":
+                return self._error(f"Identity '{name}' is not a client (type={identity_type})")
+
+            # Request body params override config settings
+            settings = config.get("settings", {})
+            latitude = data.get("latitude", settings.get("latitude", 0.0))
+            longitude = data.get("longitude", settings.get("longitude", 0.0))
+            disable_fwd = data.get("disable_fwd", settings.get("disable_fwd", False))
+
+            if self.event_loop is None:
+                return self._error("Event loop not available")
+
+            import asyncio
+            future = asyncio.run_coroutine_threadsafe(
+                self._send_client_advert_async(
+                    identity=identity,
+                    node_name=name,
+                    latitude=latitude,
+                    longitude=longitude,
+                    disable_fwd=disable_fwd,
+                ),
+                self.event_loop
+            )
+
+            result = future.result(timeout=10)
+
+            if result:
+                return self._success({
+                    "name": name,
+                    "latitude": latitude,
+                    "longitude": longitude
+                }, message=f"Advert sent for client '{name}'")
+            else:
+                return self._error(f"Failed to send advert for client '{name}'")
+
+        except cherrypy.HTTPError:
+            raise
+        except Exception as e:
+            logger.error(f"Error sending client advert: {e}", exc_info=True)
+            return self._error(e)
+
+    async def _send_client_advert_async(self, identity, node_name, latitude, longitude, disable_fwd):
+        """Send advert for a client identity"""
+        try:
+            from pymc_core.protocol import PacketBuilder
+            from pymc_core.protocol.constants import ADVERT_FLAG_HAS_NAME
+
+            if not self.daemon_instance or not self.daemon_instance.dispatcher:
+                logger.error("Cannot send advert: dispatcher not initialized")
+                return False
+
+            flags = ADVERT_FLAG_HAS_NAME
+
+            packet = PacketBuilder.create_advert(
+                local_identity=identity,
+                name=node_name,
+                lat=latitude,
+                lon=longitude,
+                feature1=0,
+                feature2=0,
+                flags=flags,
+                route_type="flood",
+            )
+
+            await self.daemon_instance.dispatcher.send_packet(packet, wait_for_ack=False)
+
+            if self.daemon_instance.repeater_handler:
+                self.daemon_instance.repeater_handler.mark_seen(packet)
+                logger.debug(f"Marked client advert '{node_name}' as seen in duplicate cache")
+
+            logger.info(f"Sent flood advert for client '{node_name}' at ({latitude:.6f}, {longitude:.6f})")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to send client advert: {e}", exc_info=True)
+            return False
 
     # ========== ACL (Access Control List) Endpoints ==========
     
