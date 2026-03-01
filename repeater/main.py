@@ -526,11 +526,13 @@ class RepeaterDaemon:
             return {"success": False, "error": f"Identity '{client_name}' is not a client (type={id_type})"}
 
         try:
+            from hashlib import sha256
             from pymc_core.protocol import PacketBuilder
-            from pymc_core.protocol.transport_keys import get_auto_key_for
 
-            # Derive transport key from channel name
-            transport_key = get_auto_key_for(channel)
+            if channel.lower() == "public":
+                transport_key = bytes.fromhex("8b3387e9c5cdea6ac9e5edbaa115cd72")
+            else
+                transport_key = sha256(channel.encode("utf-8")).digest()[:16]
 
             # Try the available method for creating channel/group messages
             if hasattr(PacketBuilder, 'create_channel_message'):
