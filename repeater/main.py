@@ -526,29 +526,27 @@ class RepeaterDaemon:
             return {"success": False, "error": f"Identity '{client_name}' is not a client (type={id_type})"}
 
         try:
+            import struct
+            import time
+            import hmac as hmac_module
             from hashlib import sha256
-            from pymc_core.protocol import PacketBuilder
 
+            # Derive channel key
             if channel.lower() == "public":
-                transport_key = bytes.fromhex("8b3387e9c5cdea6ac9e5edbaa115cd72")
+                channel_key = bytes.fromhex("8b3387e9c5cdea6ac9e5edbaa115cd72")
+            elif channel.startswith("#"):
+                channel_key = sha256(channel.encode("utf-8")).digest()[:16]
             else:
-                transport_key = sha256(channel.encode("utf-8")).digest()[:16]
+                return {"success": False, "error": "Channel must be 'Public' or start with '#'"}
 
-            # Try the available method for creating channel/group messages
-            if hasattr(PacketBuilder, 'create_channel_message'):
-                pkt = PacketBuilder.create_channel_message(
-                    local_identity=client_identity,
-                    channel_key=transport_key,
-                    message=message,
-                )
-            elif hasattr(PacketBuilder, 'create_group_text'):
-                pkt = PacketBuilder.create_group_text(
-                    local_identity=client_identity,
-                    channel_key=transport_key,
-                    message=message,
-                )
-            else:
-                return {"success": False, "error": "PacketBuilder does not have a channel/group message method"}
+            # Prepend sender name (MeshCore convention: "Name: Message")
+            sender_name = _config.get("name", client_name)
+            full_message = f"{sender_name}: {message}".encode("utf-8")
+
+            # Build group text packet
+            pkt = self._build_group_text_packet(
+                channel_key, full_message, struct, time, hmac_module, sha256,
+            )
 
             await self.dispatcher.send_packet(pkt, wait_for_ack=False)
 
@@ -569,6 +567,54 @@ class RepeaterDaemon:
         except Exception as e:
             logger.error(f"Failed to send channel message: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
+
+    @staticmethod
+    def _build_group_text_packet(channel_key, message_bytes, struct, time, hmac_module, sha256):
+        """Build a MeshCore group text (GRP_TXT) packet.
+
+        Follows the MeshCore protocol:
+        - Payload = key_hash(1) + MAC(2) + AES-128-ECB(timestamp(4) + type(1) + msg + padding)
+        - Header  = PAYLOAD_VER_1 | PAYLOAD_TYPE_GRP_TXT | ROUTE_TYPE_FLOOD
+        """
+        from pymc_core.protocol import Packet
+        from pymc_core.protocol.packet_utils import PacketHeaderUtils
+        from pymc_core.protocol.constants import ROUTE_TYPE_FLOOD
+        from Crypto.Cipher import AES
+
+        PAYLOAD_TYPE_GRP_TXT = 5
+        TXT_TYPE_PLAIN = 0
+
+        # GroupTextMessage data: timestamp(4 LE) + txt_type(1) + message + zero-pad to 16-byte boundary
+        timestamp = int(time.time())
+        data = struct.pack("<IB", timestamp, TXT_TYPE_PLAIN) + message_bytes
+        padding = (16 - (len(data) % 16)) & 15
+        data += b'\x00' * padding
+
+        # Encrypt with AES-128 ECB using the channel key
+        cipher = AES.new(channel_key, AES.MODE_ECB)
+        encrypted = cipher.encrypt(data)
+
+        # MAC: first 2 bytes of HMAC-SHA256(key, encrypted_data)
+        mac = hmac_module.digest(channel_key, encrypted, 'SHA256')[:2]
+
+        # Channel hash: first byte of SHA256(key)
+        key_hash = bytes([sha256(channel_key).digest()[0]])
+
+        # Payload: hash(1) + MAC(2) + encrypted data
+        payload = key_hash + mac + encrypted
+
+        # Assemble Packet
+        pkt = Packet()
+        pkt.header = PacketHeaderUtils.create_header(
+            payload_type=PAYLOAD_TYPE_GRP_TXT,
+            route_type=ROUTE_TYPE_FLOOD,
+        )
+        pkt.path = bytearray()
+        pkt.path_len = 0
+        pkt.payload = bytearray(payload)
+        pkt.payload_len = len(payload)
+
+        return pkt
 
     async def run(self):
 
