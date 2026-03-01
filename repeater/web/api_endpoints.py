@@ -2441,6 +2441,7 @@ class APIEndpoints:
             
             # Build flags - just use HAS_NAME for room servers
             flags = ADVERT_FLAG_IS_ROOM_SERVER | ADVERT_FLAG_HAS_NAME
+            route_type = "direct" if disable_fwd else "flood"
             
             packet = PacketBuilder.create_advert(
                 local_identity=identity,
@@ -2450,7 +2451,7 @@ class APIEndpoints:
                 feature1=0,
                 feature2=0,
                 flags=flags,
-                route_type="flood",
+                route_type=route_type,
             )
             
             # Send via dispatcher
@@ -2460,8 +2461,8 @@ class APIEndpoints:
             if self.daemon_instance.repeater_handler:
                 self.daemon_instance.repeater_handler.mark_seen(packet)
                 logger.debug(f"Marked room server advert '{node_name}' as seen in duplicate cache")
-            
-            logger.info(f"Sent flood advert for room server '{node_name}' at ({latitude:.6f}, {longitude:.6f})")
+
+            logger.info(f"Sent {route_type} advert for room server '{node_name}' at ({latitude:.6f}, {longitude:.6f})")
             return True
             
         except Exception as e:
@@ -2620,6 +2621,7 @@ class APIEndpoints:
                 return False
 
             flags = ADVERT_FLAG_HAS_NAME
+            route_type = "direct" if disable_fwd else "flood"
 
             packet = PacketBuilder.create_advert(
                 local_identity=identity,
@@ -2629,7 +2631,7 @@ class APIEndpoints:
                 feature1=0,
                 feature2=0,
                 flags=flags,
-                route_type="direct" if disable_fwd else "flood",
+                route_type=route_type,
             )
 
             await self.daemon_instance.dispatcher.send_packet(packet, wait_for_ack=False)
@@ -2638,7 +2640,7 @@ class APIEndpoints:
                 self.daemon_instance.repeater_handler.mark_seen(packet)
                 logger.debug(f"Marked client advert '{node_name}' as seen in duplicate cache")
 
-            logger.info(f"Sent flood advert for client '{node_name}' at ({latitude:.6f}, {longitude:.6f})")
+            logger.info(f"Sent {route_type} advert for client '{node_name}' at ({latitude:.6f}, {longitude:.6f})")
             return True
 
         except Exception as e:
