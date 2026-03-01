@@ -531,7 +531,7 @@ class RepeaterDaemon:
 
             if channel.lower() == "public":
                 transport_key = bytes.fromhex("8b3387e9c5cdea6ac9e5edbaa115cd72")
-            else
+            else:
                 transport_key = sha256(channel.encode("utf-8")).digest()[:16]
 
             # Try the available method for creating channel/group messages
