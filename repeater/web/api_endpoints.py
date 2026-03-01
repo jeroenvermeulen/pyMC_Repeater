@@ -2401,12 +2401,13 @@ class APIEndpoints:
             
             import asyncio
             future = asyncio.run_coroutine_threadsafe(
-                self._send_room_server_advert_async(
+                self._send_identity_advert_async(
                     identity=identity,
                     node_name=node_name,
                     latitude=latitude,
                     longitude=longitude,
-                    disable_fwd=disable_fwd
+                    disable_fwd=disable_fwd,
+                    advert_type="room_server",
                 ),
                 self.event_loop
             )
@@ -2429,20 +2430,20 @@ class APIEndpoints:
             logger.error(f"Error sending room server advert: {e}", exc_info=True)
             return self._error(e)
     
-    async def _send_room_server_advert_async(self, identity, node_name, latitude, longitude, disable_fwd):
-        """Send advert for a room server identity"""
+    async def _send_identity_advert_async(self, identity, node_name, latitude, longitude, disable_fwd, advert_type="room_server"):
+        """Send advert for an identity (room server or client)"""
         try:
             from pymc_core.protocol import PacketBuilder
-            from pymc_core.protocol.constants import ADVERT_FLAG_HAS_NAME, ADVERT_FLAG_IS_ROOM_SERVER
-            
+            from pymc_core.protocol.constants import ADVERT_FLAG_HAS_NAME, ADVERT_FLAG_IS_ROOM_SERVER, ADVERT_FLAG_IS_CHAT_NODE
+
             if not self.daemon_instance or not self.daemon_instance.dispatcher:
                 logger.error("Cannot send advert: dispatcher not initialized")
                 return False
-            
-            # Build flags - just use HAS_NAME for room servers
-            flags = ADVERT_FLAG_IS_ROOM_SERVER | ADVERT_FLAG_HAS_NAME
+
+            type_flag = ADVERT_FLAG_IS_ROOM_SERVER if advert_type == "room_server" else ADVERT_FLAG_IS_CHAT_NODE
+            flags = type_flag | ADVERT_FLAG_HAS_NAME
             route_type = "direct" if disable_fwd else "flood"
-            
+
             packet = PacketBuilder.create_advert(
                 local_identity=identity,
                 name=node_name,
@@ -2453,20 +2454,20 @@ class APIEndpoints:
                 flags=flags,
                 route_type=route_type,
             )
-            
+
             # Send via dispatcher
             await self.daemon_instance.dispatcher.send_packet(packet, wait_for_ack=False)
-            
+
             # Mark as seen to prevent re-forwarding
             if self.daemon_instance.repeater_handler:
                 self.daemon_instance.repeater_handler.mark_seen(packet)
-                logger.debug(f"Marked room server advert '{node_name}' as seen in duplicate cache")
+                logger.debug(f"Marked {advert_type} advert '{node_name}' as seen in duplicate cache")
 
-            logger.info(f"Sent {route_type} advert for room server '{node_name}' at ({latitude:.6f}, {longitude:.6f})")
+            logger.info(f"Sent {route_type} advert for {advert_type} '{node_name}' at ({latitude:.6f}, {longitude:.6f})")
             return True
-            
+
         except Exception as e:
-            logger.error(f"Failed to send room server advert: {e}", exc_info=True)
+            logger.error(f"Failed to send {advert_type} advert: {e}", exc_info=True)
             return False
 
     # ========== Client Identity Endpoints ==========
@@ -2583,12 +2584,13 @@ class APIEndpoints:
 
             import asyncio
             future = asyncio.run_coroutine_threadsafe(
-                self._send_client_advert_async(
+                self._send_identity_advert_async(
                     identity=identity,
                     node_name=name,
                     latitude=latitude,
                     longitude=longitude,
                     disable_fwd=disable_fwd,
+                    advert_type="client",
                 ),
                 self.event_loop
             )
@@ -2610,42 +2612,7 @@ class APIEndpoints:
             logger.error(f"Error sending client advert: {e}", exc_info=True)
             return self._error(e)
 
-    async def _send_client_advert_async(self, identity, node_name, latitude, longitude, disable_fwd):
-        """Send advert for a client identity"""
-        try:
-            from pymc_core.protocol import PacketBuilder
-            from pymc_core.protocol.constants import ADVERT_FLAG_HAS_NAME
 
-            if not self.daemon_instance or not self.daemon_instance.dispatcher:
-                logger.error("Cannot send advert: dispatcher not initialized")
-                return False
-
-            flags = ADVERT_FLAG_HAS_NAME
-            route_type = "direct" if disable_fwd else "flood"
-
-            packet = PacketBuilder.create_advert(
-                local_identity=identity,
-                name=node_name,
-                lat=latitude,
-                lon=longitude,
-                feature1=0,
-                feature2=0,
-                flags=flags,
-                route_type=route_type,
-            )
-
-            await self.daemon_instance.dispatcher.send_packet(packet, wait_for_ack=False)
-
-            if self.daemon_instance.repeater_handler:
-                self.daemon_instance.repeater_handler.mark_seen(packet)
-                logger.debug(f"Marked client advert '{node_name}' as seen in duplicate cache")
-
-            logger.info(f"Sent {route_type} advert for client '{node_name}' at ({latitude:.6f}, {longitude:.6f})")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to send client advert: {e}", exc_info=True)
-            return False
 
     # ========== ACL (Access Control List) Endpoints ==========
     
